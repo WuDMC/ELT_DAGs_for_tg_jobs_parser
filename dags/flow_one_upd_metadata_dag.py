@@ -91,6 +91,7 @@ with DAG(
     default_args=default_args,
     schedule_interval='0 */3 * * *',
     catchup=False,
+    max_active_runs=1,
 ) as dag:
     # Определяем порядок выполнения задач
     tg_dialog_task = init_channel_parser_and_parse_tg_dialog()

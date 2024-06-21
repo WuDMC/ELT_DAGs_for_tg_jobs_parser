@@ -112,6 +112,7 @@ with DAG(
     default_args=default_args,
     schedule_interval='15 */6 * * *',
     catchup=False,
+    max_active_runs=1,
 ) as dag:
     list_raw_msgs_files = PythonOperator(
         task_id='list_files',

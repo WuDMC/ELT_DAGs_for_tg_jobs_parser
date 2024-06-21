@@ -145,6 +145,7 @@ with DAG(
         default_args=default_args,
         schedule_interval='15 */1 * * *',
         catchup=False,
+        max_active_runs=1,
 ) as dag:
     stats_task = check_unparsed_msgs()
     parse_msgs_task = parse_messages()
