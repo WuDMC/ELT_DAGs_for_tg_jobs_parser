@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 import os
 import logging
 
-
 # metadata downloaded from cloud
 CL_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'gsc_channels_metadata.json')
 # metadata parser from telegram
@@ -17,6 +16,15 @@ TG_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'tg_channels_metadata.
 MG_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'merged_channels_metadata.json')
 # metadata uploadede to cloud (messages)
 UP_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'uploaded_msgs_metadata.json')
+
+
+class Context:
+    def __init__(self):
+        self.storage_manager = StorageManager()
+        self.msg_parser = MessageParser()
+
+
+ctx = Context()
 
 
 def get_chunk_msgs(parser, channel, save_to=volume_folder_path):
@@ -48,12 +56,11 @@ def parse_messages():
     each channel run job  two 'get messages' (saved to_json)
     :return:
     """
-    parser = MessageParser()
     channels = json_helper.read_json(CL_CHANNELS_LOCAL_PATH)
     for ch_id in channels:
         if channels[ch_id]['status'] == 'bad' or channels[ch_id]['type'] != 'ChatType.CHANNEL':
             continue
-        get_chunk_msgs(parser, channels[ch_id])
+        get_chunk_msgs(ctx.msg_parser, channels[ch_id])
 
 
 @task
@@ -70,8 +77,7 @@ def check_unparsed_msgs():
     bad_channels_ids = []
     to_upd_channels_ids = []
 
-    storage_manager = StorageManager()
-    storage_manager.download_channels_metadata(path=CL_CHANNELS_LOCAL_PATH)
+    ctx.storage_manager.download_channels_metadata(path=CL_CHANNELS_LOCAL_PATH)
     channels = json_helper.read_json(CL_CHANNELS_LOCAL_PATH)
 
     for group in channels.values():
@@ -99,6 +105,7 @@ def check_unparsed_msgs():
     logging.info(f'bad_channels: {bad_channels}')
     logging.info(f'bad_channels_ids: {bad_channels_ids}')
 
+
 @task
 def upload_msgs_to_cloud():
     """
@@ -106,7 +113,6 @@ def upload_msgs_to_cloud():
     update cloud metadata with left and right ids if loaded OK
     :return:
     """
-    storage_manager = StorageManager()
     # storage_manager.download_channels_metadata(path=CL_CHANNELS_LOCAL_PATH)
     results = {}
     for filename in os.listdir(volume_folder_path):
@@ -116,7 +122,7 @@ def upload_msgs_to_cloud():
             left = int(match.group('left'))
             right = int(match.group('right'))
             blob_path = f'{chat_id}/{filename}'
-            uploaded = storage_manager.upload_message(os.path.join(volume_folder_path, filename), blob_path)
+            uploaded = ctx.storage_manager.upload_message(os.path.join(volume_folder_path, filename), blob_path)
             # uploaded = True
             if uploaded:
                 results[chat_id] = {
@@ -124,10 +130,11 @@ def upload_msgs_to_cloud():
                     'new_right_saved_id': right,
                     'uploaded_path': blob_path
                 }
-                storage_manager.delete_local_file(os.path.join(volume_folder_path, filename))
+                ctx.storage_manager.delete_local_file(os.path.join(volume_folder_path, filename))
     json_helper.save_to_json(results, UP_CHANNELS_LOCAL_PATH)
     json_helper.update_uploaded_borders(CL_CHANNELS_LOCAL_PATH, UP_CHANNELS_LOCAL_PATH, MG_CHANNELS_LOCAL_PATH)
-    storage_manager.update_channels_metadata(MG_CHANNELS_LOCAL_PATH)
+    ctx.storage_manager.update_channels_metadata(MG_CHANNELS_LOCAL_PATH)
+
 
 default_args = {
     'owner': 'airflow',
@@ -141,11 +148,13 @@ default_args = {
 
 # Определяем DAG
 with DAG(
-        'parse_messages_from_all_chats',
+        'parse_messages',
         default_args=default_args,
         schedule_interval='15 */1 * * *',
         catchup=False,
         max_active_runs=1,
+        tags=['f1', 'message-processing', 'gcs', 'tg_jobs_parser']
+
 ) as dag:
     stats_task = check_unparsed_msgs()
     parse_msgs_task = parse_messages()

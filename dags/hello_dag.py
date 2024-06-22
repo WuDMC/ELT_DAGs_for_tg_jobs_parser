@@ -2,7 +2,7 @@ import datetime
 from airflow.decorators import task, dag
 
 
-@dag(schedule=None, start_date=datetime.datetime(2024, 6, 1))
+@dag(schedule=None, start_date=datetime.datetime(2024, 6, 1), tags=['test'])
 def first_hello():
 
     @task

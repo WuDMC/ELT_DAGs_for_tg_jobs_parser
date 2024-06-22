@@ -29,6 +29,7 @@ with DAG(
     description='Load data from GCS to BigQuery',
     schedule_interval=None,
     catchup=False,
+    tags=['test']
 ) as dag:
 
     # Ожидание появления нового файла в GCS
