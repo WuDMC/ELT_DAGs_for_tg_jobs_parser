@@ -157,5 +157,6 @@ with DAG(
 
     list_raw_msgs_files >> check_files_statuses >> upload_msgs_to_bq >> update_status_table >> clear_tmp_files
 
+
 if __name__ == '__main__':
     dag.test()
