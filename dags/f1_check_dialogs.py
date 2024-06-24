@@ -14,7 +14,7 @@ logging.info('Initializing TelegramParser and StorageManager')
 storage_manager = StorageManager()
 tg_parser = TelegramParser()
 
-# Define paths
+# Define tmp paths
 CL_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'f1.1_gsc_channels_metadata.json')
 TG_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'f1.1_tg_channels_metadata.json')
 MG_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'f1.1_merged_channels_metadata.json')
@@ -46,6 +46,7 @@ def update_target_ids(date=vars.START_DATE, force=False):
         tg_channels = json_helper.read_json(TG_CHANNELS_LOCAL_PATH)
         # set to cloud_channels target id from parsed dialogs
         json_helper.set_target_ids(tg_channels, cloud_channels, tg_parser, date, force)
+        # save updated cloud_channels
         json_helper.save_to_json(cloud_channels, CL_CHANNELS_LOCAL_PATH)
         logging.info(f'Saved updated metadata to {CL_CHANNELS_LOCAL_PATH}')
         return True
@@ -55,7 +56,7 @@ def update_target_ids(date=vars.START_DATE, force=False):
 
 def update_last_updated_ids():
     try:
-        logging.info('Merging metadata to update last posted ids in tg cgannels')
+        logging.info('Merging metadata to update last posted ids in tg channels')
         json_helper.merge_json_files(file1_path=CL_CHANNELS_LOCAL_PATH, file2_path=TG_CHANNELS_LOCAL_PATH,
                                      output_path=MG_CHANNELS_LOCAL_PATH)
         logging.info(f'Merged metadata saved to {MG_CHANNELS_LOCAL_PATH}')
@@ -79,11 +80,11 @@ def delete_tmp_files():
         os.remove(CL_CHANNELS_LOCAL_PATH)
         os.remove(TG_CHANNELS_LOCAL_PATH)
         os.remove(MG_CHANNELS_LOCAL_PATH)
-        print("Files deleted successfully.")
+        logging.info("Files deleted successfully.")
     except FileNotFoundError:
-        print("One or more files were not found.")
+        logging.info("One or more files were not found.")
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logging.info(f"An error occurred: {e}")
 
 
 def check_unparsed_msgs():
