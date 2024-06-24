@@ -146,5 +146,6 @@ with DAG(
     parse_tg_dialogs_task >> get_cloud_metadata_task >> update_target_ids_task \
         >> update_last_updated_ids_task >> update_cloud_metadata_task >> delete_tmp_files_task >> stats_task
 
+
 if __name__ == '__main__':
     dag.test()
