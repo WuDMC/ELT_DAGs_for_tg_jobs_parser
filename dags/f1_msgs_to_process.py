@@ -1,42 +1,38 @@
 import logging
 import os
+from datetime import datetime
+
 from airflow import DAG
-from airflow.utils.dates import days_ago
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator, ShortCircuitOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from google.api_core.exceptions import NotFound
+
 from tg_jobs_parser.google_cloud_helper.storage_manager import StorageManager
 from tg_jobs_parser.google_cloud_helper.bigquery_manager import BigQueryManager
 from tg_jobs_parser.configs import vars, volume_folder_path
 from tg_jobs_parser.utils import json_helper
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
-default_args = {
-    'owner': 'airflow',
-    'start_date': days_ago(1),
-    'retries': 1,
-}
-
+# Define paths
 TMP_FILE = os.path.join(volume_folder_path, 'tmp_not_processed_msg_files.json')
 
-
-class Context:
-    def __init__(self):
-        self.storage_manager = StorageManager()
-        self.bigquery_manager = BigQueryManager(vars.PROJECT_ID)
-
-
-ctx = Context()
+# Initialize necessary components
+logging.info('Initializing StorageManager and BigQueryManager')
+storage_manager = StorageManager()
+bigquery_manager = BigQueryManager(vars.PROJECT_ID)
 
 
 def list_msgs():
-    logging.info("Listing messages from storage.")
-    return ctx.storage_manager.list_msgs_with_metadata()
+    try:
+        logging.info("Listing messages from storage.")
+        return storage_manager.list_msgs_with_metadata()
+    except Exception as e:
+        raise Exception(f'Error listing messages from storage: {e}')
 
 
 def check_table_exists():
     try:
         logging.info(f"Checking if table {vars.BIGQUERY_DATASET}.{vars.BIGQUERY_UPLOAD_STATUS_TABLE} exists.")
-        ctx.bigquery_manager.client.get_table(f"{vars.BIGQUERY_DATASET}.{vars.BIGQUERY_UPLOAD_STATUS_TABLE}")
+        bigquery_manager.client.get_table(f"{vars.BIGQUERY_DATASET}.{vars.BIGQUERY_UPLOAD_STATUS_TABLE}")
         return True
     except NotFound:
         logging.warning("Table not found.")
@@ -45,83 +41,88 @@ def check_table_exists():
 
 def check_msg_files_in_process():
     if check_table_exists():
-        logging.info("Fetching uploaded files from BigQuery.")
-        return ctx.bigquery_manager.fetch_data(
-            dataset_id=vars.BIGQUERY_DATASET,
-            table_id=vars.BIGQUERY_UPLOAD_STATUS_TABLE,
-            selected_fields='filename'
-        )
+        try:
+            logging.info("Fetching uploaded files from BigQuery.")
+            return bigquery_manager.fetch_data(
+                dataset_id=vars.BIGQUERY_DATASET,
+                table_id=vars.BIGQUERY_UPLOAD_STATUS_TABLE,
+                selected_fields='filename'
+            )
+        except Exception as e:
+            raise Exception(f'Error fetching uploaded files from BigQuery: {e}')
     else:
         logging.warning("No uploaded files to fetch.")
         return []
 
 
 def download_and_process_files(**kwargs):
-    gsc_files = kwargs['ti'].xcom_pull(task_ids='t1_list_files')
-    bigquery_files = kwargs['ti'].xcom_pull(task_ids='t2_check_uploaded')
-
-    if not gsc_files:
-        logging.info("No files found in storage.")
-        return
-
-    existing_files_set = set(file['filename'] for file in bigquery_files)
-    data = []
-    for file in gsc_files:
-        if file['name'] in existing_files_set:
-            logging.info(f"File {file['name']} already exists in BigQuery. Skipping.")
-            continue
-
-        match = vars.MSGS_FILE_PATTERN.match(file['name'])
-        if not match:
-            logging.warning(f"Filename {file['name']} does not match the expected pattern.")
-            continue
-
-        row = json_helper.make_row_msg_status(file, match, status='in process')
-        data.append(row)
-
-    if not data:
-        logging.info("No new files to process.")
-        return
-
-    # Save data to a temporary file
     try:
-        json_helper.save_to_line_delimited_json(data, TMP_FILE)
-        logging.info(f"Temporary file created at {TMP_FILE}")
-    except Exception as e:
-        logging.error(f"Error creating temporary file: {e}")
-        return
+        gsc_files = kwargs['ti'].xcom_pull(task_ids='t1_list_files')
+        bigquery_files = kwargs['ti'].xcom_pull(task_ids='t2_check_msg_files_in_process')
+        if not gsc_files:
+            logging.info("No files found in storage.")
+            return False
 
-    return TMP_FILE
+        existing_files_set = set(file['filename'] for file in bigquery_files)
+        data = []
+        process_status = 0
+        process_len = len(gsc_files)
+        for file in gsc_files:
+            process_status += 1
+            logging.info(f'processed {process_status} from {process_len} channels')
+            if file['name'] in existing_files_set:
+                # logging.info(f"File {file['name']} already exists in BigQuery. Skipping.")
+                continue
+
+            match = vars.MSGS_FILE_PATTERN.match(file['name'])
+            if not match:
+                logging.warning(f"Filename {file['name']} does not match the expected pattern.")
+                continue
+
+            row = json_helper.make_row_msg_status(file, match, status='in process')
+            data.append(row)
+
+        if not data:
+            logging.info("No new files to process.")
+            return False
+
+        # Save data to a temporary file
+        json_helper.save_to_line_delimited_json(data, TMP_FILE)
+        logging.info(f"Temporary file with msg_files statuses created at {TMP_FILE}")
+
+        return TMP_FILE
+    except Exception as e:
+        raise Exception(f'Error downloading and processing files: {e}')
 
 
 def update_status_table(file_path):
-    if not file_path:
-        logging.info('No files to process. Be happy!')
-        return
-
-    logging.info(f"Uploading file {file_path} to BigQuery.")
-    return ctx.bigquery_manager.load_json_to_bigquery(
-        json_file_path=file_path,
-        table_id=f'{vars.BIGQUERY_DATASET}.{vars.BIGQUERY_UPLOAD_STATUS_TABLE}'
-    )
+    try:
+        logging.info(f"Uploading file {file_path} to BigQuery.")
+        return bigquery_manager.load_json_to_bigquery(
+            json_file_path=file_path,
+            table_id=f'{vars.BIGQUERY_DATASET}.{vars.BIGQUERY_UPLOAD_STATUS_TABLE}'
+        )
+    except Exception as e:
+        raise Exception(f'Error uploading file to BigQuery: {e}')
 
 
 def clear_tmp_files(file_path):
-    if not file_path:
-        logging.info('No files to process. Be happy!')
-        return
-
     try:
         os.remove(file_path)
         logging.info(f'Temporary file {file_path} deleted')
     except OSError as e:
-        logging.error(f'Error: {e}')
+        logging.error(f'Error deleting temporary file {file_path}: {e}')
 
+
+default_args = {
+    'owner': 'airflow',
+    'start_date': datetime(2024, 6, 1),
+}
 
 with DAG(
         'f1_msgs_to_process',
         default_args=default_args,
-        schedule_interval='15 */6 * * *',
+        schedule='15 */6 * * *',
         catchup=False,
         max_active_runs=1,
         tags=['f1', 'message-processing', 'bigquery', 'gcs', 'tg_jobs_parser']
@@ -136,7 +137,7 @@ with DAG(
         python_callable=check_msg_files_in_process,
     )
 
-    process_new_files = PythonOperator(
+    process_new_files = ShortCircuitOperator(
         task_id='t3_get_files_to_process_task',
         python_callable=download_and_process_files,
         provide_context=True,
@@ -157,11 +158,12 @@ with DAG(
     trigger_f1_load_msg_to_bq = TriggerDagRunOperator(
         task_id='trigger_f1_load_msg_to_bq',
         trigger_dag_id='f1_load_msg_to_bq',
-        wait_for_completion=False,  # Не ждем завершения DAG-а
-        execution_date='{{ execution_date }}',  # Передаем execution_date
+        wait_for_completion=False,
+        logical_date='{{ execution_date }}'
     )
 
-    list_raw_msgs_files >> check_msg_files_in_process >> process_new_files >> update_status_table >> clear_tmp_files >> trigger_f1_load_msg_to_bq
+    list_raw_msgs_files >> check_msg_files_in_process >> process_new_files
+    process_new_files >> update_status_table >> clear_tmp_files >> trigger_f1_load_msg_to_bq
 
 if __name__ == '__main__':
     dag.test()
