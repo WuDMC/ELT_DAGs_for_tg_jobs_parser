@@ -1,163 +1,123 @@
-from tg_jobs_parser.google_cloud_helper.storage_manager import StorageManager
-from tg_jobs_parser.telegram_helper.message_parser import MessageParser
-from tg_jobs_parser.utils import json_helper
-from tg_jobs_parser.configs import vars, volume_folder_path
-from airflow import DAG
-from airflow.decorators import task
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import logging
 
-# metadata downloaded from cloud
-CL_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'gsc_channels_metadata.json')
-# metadata parser from telegram
-TG_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'tg_channels_metadata.json')
-# metadata merged locally
-MG_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'merged_channels_metadata.json')
-# metadata uploadede to cloud (messages)
-UP_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'uploaded_msgs_metadata.json')
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+from tg_jobs_parser.google_cloud_helper.storage_manager import StorageManager
+from tg_jobs_parser.telegram_helper.telegram_parser import TelegramParser
+from tg_jobs_parser.utils import json_helper
+from tg_jobs_parser.configs import vars, volume_folder_path
+
+# Define paths
+CL_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'f1.2_gsc_channels_metadata.json')
+TG_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'f1.2_tg_channels_metadata.json')
+MG_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'f1.2_merged_channels_metadata.json')
+UP_CHANNELS_LOCAL_PATH = os.path.join(volume_folder_path, 'f1.2_uploaded_msgs_metadata.json')
+
+# Initialize necessary components
+logging.info('Initializing StorageManager and MessageParser')
+storage_manager = StorageManager()
+msg_parser = TelegramParser()
 
 
-class Context:
-    def __init__(self):
-        self.storage_manager = StorageManager()
-        self.msg_parser = MessageParser()
-
-
-ctx = Context()
-
-
-def get_chunk_msgs(parser, channel, save_to=volume_folder_path):
-    """
-    job two - read messages from channel
-    # save in to json & avro files locally
-    :param parser:
-    :param save_to:
-    :param channel:
-    :return: just save parsed msges to volume path
-    """
-    # flow right: target_id or right border =>>>  last_posted_message_id.
-    # flow left:  target_id <<<= left border or last_posted_message_id
-    print(f'{channel} will be saved to {save_to}')
-    msgs, left, right = parser.run_chat_parser(channel)
-    if msgs:
-        json_helper.save_to_line_delimited_json(
-            msgs,
-            os.path.join(save_to, f"msgs{channel['id']}_left_{left}_right_{right}.json")
-        )
-    else:
-        print(f"Nothing to save channel: {channel['id']}")
-
-
-@task
-def parse_messages():
-    """
-    get channels_metadata from GCS
-    each channel run job  two 'get messages' (saved to_json)
-    :return:
-    """
-    channels = json_helper.read_json(CL_CHANNELS_LOCAL_PATH)
-    for ch_id in channels:
-        if channels[ch_id]['status'] == 'bad' or channels[ch_id]['type'] != 'ChatType.CHANNEL':
-            continue
-        get_chunk_msgs(ctx.msg_parser, channels[ch_id])
-
-
-@task
 def check_unparsed_msgs():
-    """
-    just check how much messages we have
-    :return:
-    """
-    channels_total = 0
-    channels_done = 0
-    channels_to_update = 0
-    bad_channels = 0
-    total_difference = 0
-    bad_channels_ids = []
-    to_upd_channels_ids = []
+    try:
+        logging.info('Checking stats')
+        storage_manager.check_channel_stats()
+        return True
+    except Exception as e:
+        raise Exception(f'Error Checking stats: {e}')
 
-    ctx.storage_manager.download_channels_metadata(path=CL_CHANNELS_LOCAL_PATH)
-    channels = json_helper.read_json(CL_CHANNELS_LOCAL_PATH)
 
-    for group in channels.values():
-        if group["status"] == "ok" and group['type'] == 'ChatType.CHANNEL' \
-                and "last_posted_message_id" in group and "target_id" in group:
-            difference = group["last_posted_message_id"] - group["target_id"] - (
-                    (group.get("right_saved_id") or 0) - (group.get("left_saved_id") or 0))
-            total_difference += difference
-            channels_total += 1
+def parse_messages():
+    try:
+        logging.info('Downloading channels metadata')
+        storage_manager.download_channels_metadata(path=CL_CHANNELS_LOCAL_PATH)
+        channels = json_helper.read_json(CL_CHANNELS_LOCAL_PATH)
+        process_status = 0
+        process_len = len(channels.items())
 
-            if difference == 0:
-                channels_done += 1
-            elif difference > 0:
-                channels_to_update += 1
-                to_upd_channels_ids.append(group.get("id"))
+        for ch_id, channel in channels.items():
+            process_status += 1
+            logging.info(f'processed {process_status} from {process_len} channels')
+            if channel['status'] == 'bad' or channel['type'] != 'ChatType.CHANNEL':
+                continue
+            logging.info(f'Parsing messages for channel {ch_id}')
+            msgs, left, right = msg_parser.run_chat_parser(channel)
+            if msgs:
+                json_helper.save_to_line_delimited_json(
+                    msgs,
+                    os.path.join(volume_folder_path, f"msgs{ch_id}_left_{left}_right_{right}.json")
+                )
             else:
-                bad_channels += 1
-                bad_channels_ids.append(group.get("id"))
-
-    logging.info(f'need to download total: {total_difference}')
-    logging.info(f'channels_total: {channels_total}')
-    logging.info(f'channels_done: {channels_done}')
-    logging.info(f'channels_to_update: {channels_to_update}')
-    logging.info(f'channels_to_update_ids: {to_upd_channels_ids}')
-    logging.info(f'bad_channels: {bad_channels}')
-    logging.info(f'bad_channels_ids: {bad_channels_ids}')
+                logging.info(f"Nothing to save for channel: {ch_id}")
+        return True
+    except Exception as e:
+        raise Exception(f'Error parsing messages: {e}')
 
 
-@task
-def upload_msgs_to_cloud():
-    """
-    after all messages downloaded  load to GCS
-    update cloud metadata with left and right ids if loaded OK
-    :return:
-    """
-    # storage_manager.download_channels_metadata(path=CL_CHANNELS_LOCAL_PATH)
-    results = {}
-    for filename in os.listdir(volume_folder_path):
-        match = vars.MSGS_FILE_PATTERN.match(filename)
-        if match:
-            chat_id = match.group('chat_id')
-            left = int(match.group('left'))
-            right = int(match.group('right'))
-            blob_path = f'{chat_id}/{filename}'
-            uploaded = ctx.storage_manager.upload_message(os.path.join(volume_folder_path, filename), blob_path)
-            # uploaded = True
-            if uploaded:
-                results[chat_id] = {
-                    'new_left_saved_id': left,
-                    'new_right_saved_id': right,
-                    'uploaded_path': blob_path
-                }
-                ctx.storage_manager.delete_local_file(os.path.join(volume_folder_path, filename))
-    json_helper.save_to_json(results, UP_CHANNELS_LOCAL_PATH)
-    json_helper.update_uploaded_borders(CL_CHANNELS_LOCAL_PATH, UP_CHANNELS_LOCAL_PATH, MG_CHANNELS_LOCAL_PATH)
-    ctx.storage_manager.update_channels_metadata(MG_CHANNELS_LOCAL_PATH)
+def upload_msgs_files_to_storage():
+    try:
+        logging.info('Uploading message files to storage')
+        results = {}
+        for filename in os.listdir(volume_folder_path):
+            match = vars.MSGS_FILE_PATTERN.match(filename)
+            if match:
+                chat_id = match.group('chat_id')
+                left = int(match.group('left'))
+                right = int(match.group('right'))
+                blob_path = f'{chat_id}/{filename}'
+                uploaded = storage_manager.upload_message(os.path.join(volume_folder_path, filename), blob_path)
+                if uploaded:
+                    results[chat_id] = {
+                        'new_left_saved_id': left,
+                        'new_right_saved_id': right,
+                        'uploaded_path': blob_path
+                    }
+                    storage_manager.delete_local_file(os.path.join(volume_folder_path, filename))
+        # Save info about uploaded files to storage
+        json_helper.save_to_json(results, UP_CHANNELS_LOCAL_PATH)
+        # Merge borders (cloud saved + just uploaded)
+        json_helper.update_uploaded_borders(CL_CHANNELS_LOCAL_PATH, UP_CHANNELS_LOCAL_PATH, MG_CHANNELS_LOCAL_PATH)
+        # Upload channels metadata with fresh borders
+        storage_manager.update_channels_metadata(MG_CHANNELS_LOCAL_PATH)
+        logging.info('Uploaded message files to storage successfully')
+        return True
+    except Exception as e:
+        raise Exception(f'Error uploading messages to storage: {e}')
 
 
 default_args = {
     'owner': 'airflow',
-    'depends_on_past': False,
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
     'start_date': datetime(2024, 6, 1),
 }
 
-# Определяем DAG
 with DAG(
-        'parse_messages',
+        'f1_parse_messages',
         default_args=default_args,
-        schedule_interval='15 */1 * * *',
+        schedule='15 */1 * * *',
         catchup=False,
         max_active_runs=1,
         tags=['f1', 'message-processing', 'gcs', 'tg_jobs_parser']
-
 ) as dag:
-    stats_task = check_unparsed_msgs()
-    parse_msgs_task = parse_messages()
-    upload_task = upload_msgs_to_cloud()
+    stats_task = PythonOperator(
+        task_id='t1_check_unparsed_msgs',
+        python_callable=check_unparsed_msgs
+    )
 
-    stats_task >> parse_msgs_task >> upload_task
+    parse_msgs_task = PythonOperator(
+        task_id='t2_parse_messages',
+        python_callable=parse_messages
+    )
+
+    upload_files_to_gcs_task = PythonOperator(
+        task_id='t3_upload_files_to_storage',
+        python_callable=upload_msgs_files_to_storage
+    )
+
+    stats_task >> parse_msgs_task >> upload_files_to_gcs_task
+
+if __name__ == '__main__':
+    dag.test()
