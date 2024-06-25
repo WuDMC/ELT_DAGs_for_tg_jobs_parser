@@ -97,7 +97,7 @@ default_args = {
 with DAG(
         'f1_parse_messages',
         default_args=default_args,
-        schedule='15 */1 * * *',
+        schedule='*/30 * * * *',
         catchup=False,
         max_active_runs=1,
         tags=['f1', 'message-processing', 'gcs', 'tg_jobs_parser']

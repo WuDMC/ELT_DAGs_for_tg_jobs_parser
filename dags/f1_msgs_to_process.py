@@ -69,7 +69,7 @@ def download_and_process_files(**kwargs):
         process_len = len(gsc_files)
         for file in gsc_files:
             process_status += 1
-            logging.info(f'processed {process_status} from {process_len} channels')
+            logging.info(f'processed {process_status} from {process_len} gsc_files')
             if file['name'] in existing_files_set:
                 # logging.info(f"File {file['name']} already exists in BigQuery. Skipping.")
                 continue
@@ -112,6 +112,19 @@ def clear_tmp_files(file_path):
         logging.info(f'Temporary file {file_path} deleted')
     except OSError as e:
         logging.error(f'Error deleting temporary file {file_path}: {e}')
+
+
+def check_stats():
+    try:
+        logging.info(f' checking {vars.BIGQUERY_DATASET}.{vars.BIGQUERY_UPLOAD_STATUS_TABLE}')
+        bigquery_manager.check_table_stats(f'{vars.BIGQUERY_DATASET}.{vars.BIGQUERY_UPLOAD_STATUS_TABLE}')
+        logging.info(' checking channels metadata json')
+        storage_manager.check_channel_stats()
+        logging.info(f' checking {vars.BIGQUERY_DATASET}.{vars.BIGQUERY_RAW_MESSAGES_TABLE}')
+        bigquery_manager.check_table_stats(f'{vars.BIGQUERY_DATASET}.{vars.BIGQUERY_RAW_MESSAGES_TABLE}')
+        return True
+    except Exception as e:
+        raise Exception(f'Error Checking stats: {e}')
 
 
 default_args = {
@@ -162,8 +175,13 @@ with DAG(
         logical_date='{{ execution_date }}'
     )
 
+    stats_task = PythonOperator(
+        task_id='t6_check_stats',
+        python_callable=check_stats
+    )
+
     list_raw_msgs_files >> check_msg_files_in_process >> process_new_files
-    process_new_files >> update_status_table >> clear_tmp_files >> trigger_f1_load_msg_to_bq
+    process_new_files >> update_status_table >> clear_tmp_files >> trigger_f1_load_msg_to_bq >> stats_task
 
 if __name__ == '__main__':
     dag.test()

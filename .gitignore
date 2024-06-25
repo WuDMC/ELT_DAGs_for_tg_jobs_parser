@@ -3,3 +3,4 @@
 /airflow-webserver.pid
 /airflow.db
 /airflow.cfg
+/logs/

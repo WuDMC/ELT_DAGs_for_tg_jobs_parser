@@ -88,7 +88,7 @@ def process_all_files(**kwargs):
         process_len = len(gsc_files)
         for file in gsc_files:
             process_status += 1
-            logging.info(f'processed {process_status} from {process_len} channels')
+            logging.info(f'processed {process_status} from {process_len} gsc_files')
             match = vars.MSGS_FILE_PATTERN.match(file['name'])
             if file['name'] in not_processed_files_set and match:
                 logging.info(f"File {file['name']} ready to load to BQ.")
@@ -124,6 +124,19 @@ def update_status_table(file_path):
         )
     except Exception as e:
         raise Exception(f'Error updating status table: {e}')
+
+
+def check_stats():
+    try:
+        logging.info(f' checking {vars.BIGQUERY_DATASET}.{vars.BIGQUERY_UPLOAD_STATUS_TABLE}')
+        bigquery_manager.check_table_stats(f'{vars.BIGQUERY_DATASET}.{vars.BIGQUERY_UPLOAD_STATUS_TABLE}')
+        logging.info(' checking channels metadata json')
+        storage_manager.check_channel_stats()
+        logging.info(f' checking {vars.BIGQUERY_DATASET}.{vars.BIGQUERY_RAW_MESSAGES_TABLE}')
+        bigquery_manager.check_table_stats(f'{vars.BIGQUERY_DATASET}.{vars.BIGQUERY_RAW_MESSAGES_TABLE}')
+        return True
+    except Exception as e:
+        raise Exception(f'Error Checking stats: {e}')
 
 
 def clear_tmp_files(file_path):
@@ -175,8 +188,13 @@ with DAG(
         op_kwargs={'file_path': "{{ ti.xcom_pull(task_ids='t3_process_task') }}"}
     )
 
+    stats_task = PythonOperator(
+        task_id='t6_check_stats',
+        python_callable=check_stats
+    )
+
     list_raw_msgs_files >> check_files_statuses >> upload_msgs_to_bq
-    upload_msgs_to_bq >> update_status_table >> clear_tmp_files
+    upload_msgs_to_bq >> update_status_table >> clear_tmp_files >> stats_task
 
 if __name__ == '__main__':
     dag.test()
