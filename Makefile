@@ -11,7 +11,6 @@ test:
 format:
 	black tests
 	black *.py
-
 lint:
 	pylint --disable=R,C *.py
 
