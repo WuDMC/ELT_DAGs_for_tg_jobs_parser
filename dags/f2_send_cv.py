@@ -73,8 +73,7 @@ def send_messages(**kwargs):
 
         logging.info(f"Sending message to channel {ch_id}: {channel['title']}, {channel['url']}")
         try:
-            response = msg_parser.send_cv('wudmc')
-            # response = msg_parser.send_cv(int(ch_id))
+            response = msg_parser.send_cv(int(ch_id))
             result = {'result': True, 'chat_id': channel['title'], 'msg_id': response.link,
                       'datetime': str(response.date), 'error': None}
         except Exception as e:
